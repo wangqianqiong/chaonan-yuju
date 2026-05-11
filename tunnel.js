@@ -1,16 +1,17 @@
 /**
- * 隧道管理器 - 自动重连 + 保存地址
+ * 隧道管理器 (ngrok) - 自动重连 + 保存地址
  * 双击 启动系统.bat 就会自动用这个
  */
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 
 const PROJECT = path.resolve(__dirname);
 const URL_FILE = path.join(PROJECT, 'public_url.txt');
 
 let currentUrl = '';
-let ssh = null;
+let tunnel = null;
 let retryCount = 0;
 
 function saveUrl(url) {
@@ -26,53 +27,68 @@ function saveUrl(url) {
   }
 }
 
+function getNgrokUrl() {
+  return new Promise((resolve) => {
+    http.get('http://127.0.0.1:4040/api/tunnels', (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try {
+          const tunnels = JSON.parse(data).tunnels;
+          resolve(tunnels.find(t => t.public_url)?.public_url || null);
+        } catch (e) { resolve(null); }
+      });
+    }).on('error', () => resolve(null));
+  });
+}
+
 function startTunnel() {
-  if (ssh) {
-    try { ssh.kill(); } catch (e) {}
-    ssh = null;
+  if (tunnel) {
+    try { tunnel.kill(); } catch (e) {}
+    tunnel = null;
   }
 
-  console.log('>>> 创建公网隧道...');
+  console.log('>>> 创建公网隧道 (ngrok)...');
 
-  ssh = spawn('ssh', [
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'ServerAliveInterval=20',
-    '-o', 'ServerAliveCountMax=3',
-    '-o', 'ExitOnForwardFailure=yes',
-    '-R', '80:localhost:3000',
-    'nokey@localhost.run'
-  ], { shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
-
-  ssh.stdout.on('data', (data) => {
-    const text = data.toString();
-    const match = text.match(/https:\/\/[a-zA-Z0-9]+\.lhr\.life/);
-    if (match) saveUrl(match[0]);
+  tunnel = spawn('ngrok', ['http', '3000', '--log=stdout'], {
+    shell: true,
+    stdio: ['ignore', 'pipe', 'pipe']
   });
 
-  ssh.stderr.on('data', (data) => {
-    const text = data.toString();
-    process.stderr.write(text);
-    const match = text.match(/https:\/\/[a-zA-Z0-9]+\.lhr\.life/);
-    if (match) saveUrl(match[0]);
+  // 轮询 ngrok API 获取公网地址
+  let pollCount = 0;
+  const pollTimer = setInterval(async () => {
+    const url = await getNgrokUrl();
+    if (url) {
+      saveUrl(url);
+      clearInterval(pollTimer);
+    } else if (++pollCount > 30) {
+      clearInterval(pollTimer);
+      console.log('⚠️  ngrok 启动超时');
+    }
+  }, 1000);
+
+  tunnel.stderr.on('data', (data) => {
+    process.stderr.write(data.toString());
   });
 
-  ssh.on('exit', (code) => {
+  tunnel.on('exit', (code) => {
+    clearInterval(pollTimer);
     console.log(`⚠️  隧道断开(code=${code})，5秒后重连...`);
-    ssh = null;
+    tunnel = null;
     retryCount++;
     setTimeout(startTunnel, 5000);
   });
 
-  ssh.on('error', (err) => {
+  tunnel.on('error', (err) => {
+    clearInterval(pollTimer);
     console.log('⚠️  隧道错误: ' + err.message + '，5秒后重连...');
-    ssh = null;
+    tunnel = null;
     retryCount++;
     setTimeout(startTunnel, 5000);
   });
 }
 
-// 先看本地服务是否在线
-const http = require('http');
 function checkServer() {
   return new Promise((resolve) => {
     const req = http.get('http://localhost:3000', (res) => { res.resume(); resolve(true); });
@@ -85,7 +101,10 @@ async function main() {
   const alive = await checkServer();
   if (!alive) {
     console.log('❌ 本地服务没启动，正在启动...');
-    execSync('pm2 start server.js --name chaonan-yuju', { cwd: PROJECT, stdio: 'inherit', shell: true });
+    const child = spawn('node', ['server.js'], {
+      cwd: PROJECT, shell: true, stdio: 'ignore'
+    });
+    child.unref();
     // 等就绪
     for (let i = 0; i < 10; i++) {
       await new Promise(r => setTimeout(r, 1000));
@@ -95,10 +114,9 @@ async function main() {
   console.log('✅ 本地服务正常: http://localhost:3000\n');
   startTunnel();
 
-  // 保持进程运行
   process.on('SIGINT', () => {
     console.log('\n正在关闭隧道...');
-    try { if (ssh) ssh.kill(); } catch (e) {}
+    try { if (tunnel) tunnel.kill(); } catch (e) {}
     process.exit(0);
   });
 }
