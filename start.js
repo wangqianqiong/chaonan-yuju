@@ -1,5 +1,5 @@
 /**
- * 订货系统启动管理器
+ * 订货系统启动管理器 (ngrok)
  * 启动服务器 + 创建公网隧道 + 自动打开浏览器
  */
 const { spawn, execSync } = require('child_process');
@@ -9,7 +9,6 @@ const http = require('http');
 
 const PROJECT = path.resolve(__dirname);
 const URL_FILE = path.join(PROJECT, 'public_url.txt');
-const PID_FILE = path.join(PROJECT, '.tunnel.pid');
 
 function log(msg) { console.log(msg); }
 
@@ -29,6 +28,21 @@ async function waitForServer(url, maxSec) {
   return false;
 }
 
+function getNgrokUrl() {
+  return new Promise((resolve) => {
+    http.get('http://127.0.0.1:4040/api/tunnels', (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try {
+          const t = JSON.parse(data).tunnels;
+          resolve(t.find(x => x.public_url)?.public_url || null);
+        } catch (e) { resolve(null); }
+      });
+    }).on('error', () => resolve(null));
+  });
+}
+
 async function main() {
   console.log('');
   console.log('═══════════════════════════════════');
@@ -42,81 +56,58 @@ async function main() {
     execSync('npm install', { cwd: PROJECT, stdio: 'inherit' });
   }
 
-  // 2. 停止旧服务
-  try { execSync('pm2 delete chaonan-yuju', { stdio: 'ignore', shell: true }); } catch (e) {}
-  try { fs.unlinkSync(PID_FILE); } catch (e) {}
-
-  // 3. 启动服务
+  // 2. 启动服务
   log('>>> 启动订货系统服务...');
-  execSync('pm2 start server.js --name chaonan-yuju', { cwd: PROJECT, stdio: 'inherit', shell: true });
+  const server = spawn('node', ['server.js'], {
+    cwd: PROJECT, shell: true, stdio: 'inherit'
+  });
+  server.on('exit', () => { log('服务已停止'); process.exit(0); });
 
-  // 4. 等待就绪
+  // 3. 等待就绪
   log('>>> 等待服务启动...');
   const ok = await waitForServer('http://localhost:3000', 10);
   if (!ok) {
     log('❌ 服务启动失败');
     process.exit(1);
   }
-  log('✅ 本地服务已启动: http://localhost:3000');
-  log('');
+  log('✅ 本地服务已启动: http://localhost:3000\n');
 
-  // 5. 创建公网隧道
-  log('>>> 正在创建公网隧道...');
-  log('>>> (首次连接会提示确认，自动处理)');
-  log('');
+  // 4. 创建 ngrok 隧道
+  log('>>> 正在创建公网隧道 (ngrok)...\n');
 
-  const ssh = spawn('ssh', [
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'ServerAliveInterval=60',
-    '-o', 'UserKnownHostsFile=NUL',
-    '-R', '80:localhost:3000',
-    'nokey@localhost.run'
-  ], { shell: true, cwd: PROJECT, stdio: ['ignore', 'pipe', 'pipe'] });
+  const ngrok = spawn('ngrok', ['http', '3000', '--log=stdout'], {
+    shell: true, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  ngrok.stderr.on('data', (d) => process.stderr.write(d.toString()));
 
-  let urlFound = false;
-
-  function onTunnelData(text) {
-    process.stdout.write(text);
-    if (urlFound) return;
-    const match = text.match(/https:\/\/[a-zA-Z0-9]+\.lhr\.life/);
-    if (match) {
-      urlFound = true;
-      const url = match[0];
+  // 5. 等待并获取公网地址
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    const url = await getNgrokUrl();
+    if (url) {
       fs.writeFileSync(URL_FILE, url, 'utf8');
       console.log('');
       console.log('═══════════════════════════════════');
       console.log('  ✅ 系统已上线！');
       console.log('');
-      console.log('  公网地址: ' + url);
+      console.log('  ' + url);
+      console.log('');
       console.log('  管理后台: 点右上角 🔐管理');
       console.log('  管理密码: 123456');
       console.log('');
       console.log('  📌 把这个地址发到客户微信群');
-      console.log('  客户就能在手机上浏览和下单了');
-      console.log('');
-      console.log('  ⚠️ 这个窗口不要关！关了系统就停了');
-      console.log('═══════════════════════════════════');
-      console.log('');
+      console.log('═══════════════════════════════════\n');
       try { execSync('start ' + url, { shell: true }); } catch (e) {}
+      break;
     }
+    if (i === 5 || i === 15) log('  隧道建立中...');
   }
 
-  ssh.stdout.on('data', (data) => onTunnelData(data.toString()));
-  ssh.stderr.on('data', (data) => onTunnelData(data.toString()));
-
-  ssh.on('error', (err) => {
-    log('❌ 隧道创建失败: ' + err.message);
-    log('💡 本地仍可用: http://localhost:3000');
-  });
-
-  // 保存 PID
-  try { fs.writeFileSync(PID_FILE, String(ssh.pid || ''), 'utf8'); } catch (e) {}
-
-  // 处理退出
+  // 6. 保持运行
   process.on('SIGINT', () => {
     log('\n正在关闭...');
-    try { execSync('pm2 stop chaonan-yuju', { stdio: 'ignore', shell: true }); } catch (e) {}
-    try { ssh.kill(); } catch (e) {}
+    try { ngrok.kill(); } catch (e) {}
+    try { server.kill(); } catch (e) {}
     process.exit(0);
   });
 }
