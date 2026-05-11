@@ -418,6 +418,12 @@ app.get('/api/admin/stats', requireAuth, (req, res) => {
   });
 });
 
+// ---- 全局错误处理 ----
+app.use((err, req, res, next) => {
+  console.error('服务器错误:', err.message);
+  res.status(500).json({ error: '服务器内部错误' });
+});
+
 // ---- 前端路由 ----
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'not found' });
