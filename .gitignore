@@ -1,0 +1,8 @@
+node_modules/
+data.db*
+public/uploads/*
+!public/uploads/.gitkeep
+public_url.txt
+tunnel.log
+.tunnel.pid
+
