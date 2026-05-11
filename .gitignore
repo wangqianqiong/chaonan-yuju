@@ -1,8 +1,12 @@
 node_modules/
-data.db*
+data.db
+data.db-shm
+data.db-wal
 public/uploads/*
 !public/uploads/.gitkeep
 public_url.txt
 tunnel.log
 .tunnel.pid
+*.log
+_check.js
 
